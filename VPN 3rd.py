@@ -35,13 +35,23 @@ def encrypt_user_credentials(user_id, password, access_identifier, public_key):
     encrypted_data = cipher_rsa.encrypt(combined_data)
     return encrypted_data
 
+def derive_session_key(access_identifier):
+    """AES用セッション鍵を導出"""
+    # 修正(2026-10-29): RSA暗号文は256バイトでAES鍵長に合わず、OAEPのランダム性で
+    # サーバー/クライアントが独立に計算しても一致しないため、鍵には使えない。
+    # 両側が同じ値（認証情報のハッシュ＋アクセス識別子）から決定的に導出する
+    credentials = f"{USER_ID}:{PASSWORD}".encode()
+    hashed_credentials = hashlib.sha256(credentials).digest()
+    return hashlib.sha256(hashed_credentials + access_identifier).digest()
+
 def handle_client(conn, addr):
     """クライアント接続を処理"""
     logging.info(f'Connected by {addr}')
     
     try:
         access_identifier = conn.recv(16)
-        encrypted_key = encrypt_user_credentials(USER_ID, PASSWORD, access_identifier, server_public_key)
+        # 修正(2026-10-29): AES鍵は derive_session_key で導出する（上記参照）
+        session_key = derive_session_key(access_identifier)
         
         while True:
             data = conn.recv(1024)
@@ -50,7 +60,7 @@ def handle_client(conn, addr):
             
             nonce = data[:16]
             ciphertext = data[16:]
-            cipher = AES.new(encrypted_key, AES.MODE_GCM, nonce=nonce)
+            cipher = AES.new(session_key, AES.MODE_GCM, nonce=nonce)
             plaintext = cipher.decrypt(ciphertext)
             
             logging.info(f'Received data from {addr}: {plaintext.decode()}')
@@ -89,11 +99,12 @@ def vpn_client():
         access_identifier = get_random_bytes(16)
         ssock.sendall(access_identifier)
         
-        encrypted_key = encrypt_user_credentials(USER_ID, PASSWORD, access_identifier, server_public_key)
+        # 修正(2026-10-29): AES鍵は derive_session_key で導出する（サーバー側と一致させる）
+        session_key = derive_session_key(access_identifier)
         
         message = b'Hello, Server!'
         nonce = get_random_bytes(16)
-        cipher = AES.new(encrypted_key, AES.MODE_GCM, nonce=nonce)
+        cipher = AES.new(session_key, AES.MODE_GCM, nonce=nonce)
         ciphertext = cipher.encrypt(message)
         
         ssock.sendall(nonce + ciphertext)
